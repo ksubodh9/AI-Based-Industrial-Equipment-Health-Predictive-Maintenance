@@ -20,6 +20,37 @@ def load_local_history():
     return df
 
 
+def local_predict_from_series(series: pd.Series) -> dict:
+    """Load local models and run prediction using ml.pipeline helpers.
+    Returns a dict matching the backend /predict response shape.
+    """
+    try:
+        # import lazily to avoid requiring ml at Streamlit import time
+        from ml.pipeline import load_models, predict_fault, predict_maintenance, explain_prediction
+    except Exception as e:
+        raise RuntimeError(f'Local models not available: {e}')
+
+    fault_pipeline, maintenance_pipeline, label_encoder, metrics = load_models()
+    row = pd.DataFrame([series.to_dict()])
+    fault_label, fault_conf, fault_probs = predict_fault(fault_pipeline, label_encoder, row)
+    maintenance_required, maintenance_conf, maintenance_probs = predict_maintenance(maintenance_pipeline, row)
+    explanation = explain_prediction(fault_pipeline, row, top_n=5)
+    status = 'Critical' if maintenance_required or (fault_label != 'no_fault' and fault_conf > 0.75) else ('Warning' if maintenance_required or fault_label != 'no_fault' else 'Healthy')
+    recommended = 'Inspect equipment immediately and schedule maintenance.' if status == 'Critical' else ('Monitor closely and prepare a service window.' if status == 'Warning' else 'Continue monitoring under normal operation.')
+    return {
+        'equipment_id': series['equipment_id'],
+        'predicted_fault': fault_label,
+        'fault_confidence': round(fault_conf, 4),
+        'predicted_maintenance': maintenance_required,
+        'maintenance_confidence': round(maintenance_conf, 4),
+        'health_status': status,
+        'recommended_action': recommended,
+        'fault_probabilities': [round(float(x), 4) for x in fault_probs],
+        'maintenance_probabilities': [round(float(x), 4) for x in maintenance_probs],
+        'explanation': explanation,
+    }
+
+
 def compute_health_label(fault: str, maintenance: bool, fault_conf: float, maintenance_conf: float):
     if maintenance or fault != 'no_fault':
         if max(fault_conf, maintenance_conf) >= 0.75:
@@ -91,13 +122,19 @@ def main():
         'wavelet_feature_5': float(latest.wavelet_feature_5),
     }
 
+    # Try remote backend first, fall back to local model if unavailable
+    prediction = None
     try:
-        predict_resp = requests.post(predict_url, json=payload, timeout=10)
+        predict_resp = requests.post(predict_url, json=payload, timeout=6)
         predict_resp.raise_for_status()
         prediction = predict_resp.json()
     except Exception as err:
-        st.error(f'Prediction request failed: {err}')
-        return
+        st.warning(f'Prediction request failed (backend unreachable). Trying local model: {err}')
+        try:
+            prediction = local_predict_from_series(latest)
+        except Exception as e:
+            st.error(f'Local prediction also failed: {e}')
+            return
 
     status_text, status_badge = compute_health_label(
         prediction['predicted_fault'], prediction['predicted_maintenance'], prediction['fault_confidence'], prediction['maintenance_confidence']

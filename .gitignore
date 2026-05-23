@@ -31,7 +31,8 @@ dist/
 Thumbs.db
 
 # Model artifacts
-ml/model_store/
+# model artifacts are kept in repo for Streamlit single-app deployment
+# remove the above line to include ml/model_store in the repository
 
 # Logs
 *.log
