@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from pathlib import Path
+import sys
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 try:
@@ -13,6 +14,10 @@ except Exception:
     API_URL = None
 API_URL = API_URL or os.getenv('API_URL', 'http://localhost:8000')
 DATA_PATH = BASE_DIR / 'petrochemical_maintenance.csv'
+
+# Ensure project root is on sys.path so `from ml import ...` works in different runtimes
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 @st.cache_data
 def load_local_history():
