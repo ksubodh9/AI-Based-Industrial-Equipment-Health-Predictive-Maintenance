@@ -77,13 +77,25 @@ def main():
     predict_url = f'{API_URL}/predict'
     health_url = f'{API_URL}/model/health'
 
+    # Try to fetch history from remote backend, otherwise use local CSV
+    history_data = None
     try:
-        history_resp = requests.get(history_url, timeout=10)
+        history_resp = requests.get(history_url, timeout=6)
         history_resp.raise_for_status()
         history_data = history_resp.json()
     except Exception as err:
-        st.error(f'Unable to fetch equipment history: {err}')
-        return
+        st.warning(f'Unable to fetch equipment history from backend ({err}). Using local dataset fallback.')
+        subset = df[df['equipment_id'] == equipment_id].sort_values('timestamp')
+        if subset.empty:
+            st.error(f'No history available for equipment {equipment_id}')
+            return
+        history = subset.tail(200).to_dict(orient='records')
+        latest_local = history[-1]
+        history_data = {
+            'equipment_id': equipment_id,
+            'history': history,
+            'latest': latest_local,
+        }
 
     history_df = pd.DataFrame(history_data['history'])
     history_df['timestamp'] = pd.to_datetime(history_df['timestamp'])
@@ -160,13 +172,56 @@ def main():
         st.info('SHAP explainability not available for this model in the current environment.')
 
     st.markdown('### Model health monitoring')
+    # Try to fetch model health from remote backend, otherwise use local metrics
+    health = None
     try:
-        health_resp = requests.get(health_url, timeout=10)
+        health_resp = requests.get(health_url, timeout=6)
         health_resp.raise_for_status()
         health = health_resp.json()
     except Exception as err:
-        st.error(f'Unable to fetch model health: {err}')
-        return
+        st.warning(f'Unable to fetch model health from backend ({err}). Using local metrics fallback.')
+        try:
+            from joblib import load
+            metrics = load(BASE_DIR / 'ml' / 'model_store' / 'metrics.joblib')
+            fault_acc = None
+            maint_acc = None
+            try:
+                fault_acc = metrics.get('fault_report', {}).get('accuracy')
+            except Exception:
+                fault_acc = None
+            try:
+                maint_acc = metrics.get('maintenance_report', {}).get('accuracy')
+            except Exception:
+                maint_acc = None
+            feature_importance = None
+            try:
+                from ml.pipeline import load_models
+                fault_pipeline, _, _, _ = load_models()
+                model = fault_pipeline.named_steps['model']
+                if hasattr(model, 'feature_importances_'):
+                    names = list(fault_pipeline.named_steps['preprocessor'].get_feature_names_out())
+                    values = model.feature_importances_
+                    feature_importance = sorted(
+                        [{'feature': n, 'importance': float(v)} for n, v in zip(names, values)],
+                        key=lambda x: x['importance'],
+                        reverse=True,
+                    )[:10]
+            except Exception:
+                feature_importance = None
+            distribution = {
+                'fault_types': df['fault_type'].value_counts(normalize=True).to_dict(),
+                'maintenance': df['maintenance_required'].value_counts(normalize=True).to_dict(),
+            }
+            health = {
+                'fault_accuracy': fault_acc,
+                'maintenance_accuracy': maint_acc,
+                'latest_prediction_confidence': None,
+                'feature_importance': feature_importance,
+                'prediction_distribution': distribution,
+            }
+        except Exception as e:
+            st.error(f'Local model health fallback failed: {e}')
+            return
 
     metrics_col1, metrics_col2 = st.columns(2)
     with metrics_col1:
