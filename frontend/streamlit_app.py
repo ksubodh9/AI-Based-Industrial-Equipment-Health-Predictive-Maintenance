@@ -89,7 +89,7 @@ def main():
         history_resp.raise_for_status()
         history_data = history_resp.json()
     except Exception as err:
-        st.warning(f'Unable to fetch equipment history from backend ({err}). Using local dataset fallback.')
+        st.info('Backend unavailable; using local dataset fallback for equipment history.')
         subset = df[df['equipment_id'] == equipment_id].sort_values('timestamp')
         if subset.empty:
             st.error(f'No history available for equipment {equipment_id}')
