@@ -12,12 +12,15 @@ try:
     API_URL = st.secrets.get('API_URL')
 except Exception:
     API_URL = None
-API_URL = API_URL or os.getenv('API_URL', 'http://localhost:8000')
+API_URL = API_URL or os.getenv('API_URL')
 DATA_PATH = BASE_DIR / 'petrochemical_maintenance.csv'
 
 # Ensure project root is on sys.path so `from ml import ...` works in different runtimes
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
+
+USE_REMOTE_BACKEND = bool(API_URL) and API_URL not in ('http://localhost:8000', 'http://127.0.0.1:8000', 'localhost', '127.0.0.1')
+REMOTE_BACKEND_NOTE = API_URL if USE_REMOTE_BACKEND else 'No remote backend configured; using local models and data.'
 
 @st.cache_data
 def load_local_history():
@@ -72,7 +75,7 @@ def main():
     equipment_ids = sorted(df['equipment_id'].unique())
     equipment_id = st.sidebar.selectbox('Select Equipment ID', equipment_ids)
     st.sidebar.markdown('### Model monitoring')
-    st.sidebar.markdown('Connects to backend at ' + API_URL)
+    st.sidebar.markdown(REMOTE_BACKEND_NOTE)
 
     if equipment_id is None:
         st.warning('Select an equipment ID to begin.')
@@ -82,14 +85,15 @@ def main():
     predict_url = f'{API_URL}/predict'
     health_url = f'{API_URL}/model/health'
 
-    # Try to fetch history from remote backend, otherwise use local CSV
     history_data = None
-    try:
-        history_resp = requests.get(history_url, timeout=6)
-        history_resp.raise_for_status()
-        history_data = history_resp.json()
-    except Exception as err:
-        st.info('Backend unavailable; using local dataset fallback for equipment history.')
+    if USE_REMOTE_BACKEND:
+        try:
+            history_resp = requests.get(history_url, timeout=6)
+            history_resp.raise_for_status()
+            history_data = history_resp.json()
+        except Exception as err:
+            st.warning(f'Remote backend unavailable; using local dataset fallback for equipment history. ({err})')
+    if history_data is None:
         subset = df[df['equipment_id'] == equipment_id].sort_values('timestamp')
         if subset.empty:
             st.error(f'No history available for equipment {equipment_id}')
@@ -139,18 +143,19 @@ def main():
         'wavelet_feature_5': float(latest.wavelet_feature_5),
     }
 
-    # Try remote backend first, fall back to local model if unavailable
     prediction = None
-    try:
-        predict_resp = requests.post(predict_url, json=payload, timeout=6)
-        predict_resp.raise_for_status()
-        prediction = predict_resp.json()
-    except Exception as err:
-        st.warning(f'Prediction request failed (backend unreachable). Trying local model: {err}')
+    if USE_REMOTE_BACKEND:
+        try:
+            predict_resp = requests.post(predict_url, json=payload, timeout=6)
+            predict_resp.raise_for_status()
+            prediction = predict_resp.json()
+        except Exception as err:
+            st.warning(f'Remote backend unreachable; falling back to local model. ({err})')
+    if prediction is None:
         try:
             prediction = local_predict_from_series(latest)
         except Exception as e:
-            st.error(f'Local prediction also failed: {e}')
+            st.error(f'Local prediction failed: {e}')
             return
 
     status_text, status_badge = compute_health_label(
@@ -177,14 +182,15 @@ def main():
         st.info('SHAP explainability not available for this model in the current environment.')
 
     st.markdown('### Model health monitoring')
-    # Try to fetch model health from remote backend, otherwise use local metrics
     health = None
-    try:
-        health_resp = requests.get(health_url, timeout=6)
-        health_resp.raise_for_status()
-        health = health_resp.json()
-    except Exception as err:
-        st.warning(f'Unable to fetch model health from backend ({err}). Using local metrics fallback.')
+    if USE_REMOTE_BACKEND:
+        try:
+            health_resp = requests.get(health_url, timeout=6)
+            health_resp.raise_for_status()
+            health = health_resp.json()
+        except Exception as err:
+            st.warning(f'Remote backend health unavailable; using local metrics fallback. ({err})')
+    if health is None:
         try:
             from joblib import load
             metrics = load(BASE_DIR / 'ml' / 'model_store' / 'metrics.joblib')
